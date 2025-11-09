@@ -1,3 +1,4 @@
+import math
 import os
 
 import torch
@@ -58,6 +59,52 @@ class Trainer:
         # ROUGE-1（基于单词）：比较单个单词的重叠情况
         # ROUGE-2（基于单词对）:比较连续两个单词的组合
         # ROUGE-L（基于最长公共子序列）:# 寻找最长的连续匹配序列
+        self.train_perplexities = []  # 新增：训练困惑度
+        self.val_perplexities = []  # 新增：验证困惑度
+        self.train_accuracies = []  # 新增：训练准确率
+        self.val_accuracies = []  # 新增：验证准确率
+
+    def calculate_perplexity(self, loss):
+        """
+        计算困惑度（Perplexity）
+        困惑度是语言模型中最重要的评估指标之一，表示模型对测试数据的"困惑程度"。
+        数学公式：perplexity = exp(loss)
+        Args:
+            loss: 交叉熵损失值
+        Returns:
+            float: 困惑度值
+        解释：
+        - 困惑度越低，说明模型对数据的预测越准确
+        - 完美预测：困惑度 = 1（损失为0时）
+        - 随机猜测：困惑度 = 词汇表大小（最差情况）
+        """
+        return math.exp(loss)
+
+    def calculate_accuracy(self, logits, labels, ignore_index=-100):
+        """
+        计算准确率（Accuracy）:
+        准确率衡量模型预测正确的token比例，是直观的评估指标。
+        Args:
+            logits: 模型输出，形状为(batch_size, seq_len, vocab_size)
+            labels: 真实标签，形状为(batch_size, seq_len)
+            ignore_index: 要忽略的标签索引（如填充token）
+        Returns:
+            float: 准确率（0.0到1.0之间）
+        """
+        # 获取预测结果（概率最大的token）
+        predictions = torch.argmax(logits, dim=-1)
+        # 创建有效token的掩码（忽略填充token）
+        valid_mask = (labels != ignore_index)
+        # 计算正确预测的数量
+        correct = (predictions == labels) & valid_mask
+        correct_count = correct.sum().item()
+        # 计算有效token的总数
+        total_valid = valid_mask.sum().item()
+        # 避免除零错误
+        if total_valid == 0:
+            return 0.0
+        accuracy = correct_count / total_valid
+        return accuracy
 
     def train_epoch(self, epoch):
         """
@@ -73,6 +120,9 @@ class Trainer:
         # 这会启用dropout、batch normalization等训练特有的行为
         self.model.train()
         total_loss = 0# 初始化该epoch的总损失，用于后续计算平均损失
+        total_perplexity = 0
+        total_accuracy = 0
+        total_batches = 0
         # 创建进度条，显示当前epoch和训练进度；tqdm提供了直观的训练进度可视化
         progress_bar = tqdm(self.train_loader, desc=f'Epoch {epoch}')
         # 遍历训练数据加载器中的每个批次
@@ -106,6 +156,13 @@ class Trainer:
                 labels[:, 1:].reshape(-1)
             )
 
+            # 计算准确率
+            accuracy = self.calculate_accuracy(
+                logits,
+                labels[:, 1:],
+                ignore_index=self.tokenizer.pad_token_id
+            )
+
             # 4. 反向传播和参数更新
             # 清空上一轮计算的梯度，防止梯度累积
             self.optimizer.zero_grad()
@@ -123,19 +180,32 @@ class Trainer:
             # 5. 损失记录和进度更新
             # 累加该批次的损失值（.item()将张量转换为Python数值）
             total_loss += loss.item()
+            total_perplexity += self.calculate_perplexity(loss.item())
+            total_accuracy += accuracy
+            total_batches += 1
             # 更新进度条显示当前批次的损失
-            progress_bar.set_postfix({'loss': loss.item()})
+            # progress_bar.set_postfix({'loss': loss.item()})
+            progress_bar.set_postfix({
+                'loss': f'{loss.item():.4f}',
+                'acc': f'{accuracy:.4f}',
+                'ppl': f'{self.calculate_perplexity(loss.item()):.2f}'
+            })
 
         # 计算该epoch的平均损失（总损失除以批次数量）
         avg_loss = total_loss / len(self.train_loader)
+        avg_perplexity = total_perplexity / len(self.train_loader)
+        avg_accuracy = total_accuracy / len(self.train_loader)
         # 将平均损失记录到训练历史中，用于后续分析和可视化
         self.train_losses.append(avg_loss)
+        self.train_perplexities.append(avg_perplexity)
+        self.train_accuracies.append(avg_accuracy)
         # 返回平均损失，供外部监控训练进度
-        return avg_loss
+        # return avg_loss
+        return avg_loss, avg_perplexity, avg_accuracy
 
     def validate(self, epoch):
         """
-        验证模型性能 - 在验证集上评估模型表现
+        验证模型性能 - 在验证集上评估模型表现，并保存预测结果
         Args:
             epoch (int): 当前训练轮数，用于进度显示和日志记录
         Returns:
@@ -151,6 +221,8 @@ class Trainer:
         self.model.eval()
         # 初始化累计变量
         total_loss = 0  # 累计验证损失
+        total_perplexity = 0
+        total_accuracy = 0
         all_predictions = []  # 存储所有生成的摘要文本
         all_references = []  # 存储所有真实的摘要文本
 
@@ -176,7 +248,17 @@ class Trainer:
                     # labels[:, 1:] 移除第一个token（通常是起始符）
                     labels[:, 1:].reshape(-1)
                 )
+
+                # 计算准确率
+                accuracy = self.calculate_accuracy(
+                    logits,
+                    labels[:, 1:],
+                    ignore_index=self.tokenizer.pad_token_id
+                )
+
                 total_loss += loss.item()  # 累加批次损失
+                total_perplexity += self.calculate_perplexity(loss.item())
+                total_accuracy += accuracy
 
                 # 4. 生成预测（用于ROUGE评估）
                 try:
@@ -236,13 +318,18 @@ class Trainer:
 
         # 6. 计算平均验证损失
         avg_loss = total_loss / len(self.val_loader)  # 总损失除以批次数量
+        avg_perplexity = total_perplexity / len(self.val_loader)
+        avg_accuracy = total_accuracy / len(self.val_loader)
 
         # 7. 记录验证结果
         self.val_losses.append(avg_loss)  # 记录验证损失历史
+        self.val_perplexities.append(avg_perplexity)
+        self.val_accuracies.append(avg_accuracy)
         self.rouge_scores.append(rouge)  # 记录ROUGE分数历史
 
         # 返回验证结果
-        return avg_loss, rouge
+        # return avg_loss, rouge
+        return avg_loss, avg_perplexity, avg_accuracy, rouge
 
     def calculate_rouge(self, predictions, references):
         """
@@ -328,6 +415,7 @@ class Trainer:
         print(f"学习率: {self.config.learning_rate}")
 
         best_rouge = 0  # 记录最佳的ROUGE-1分数
+        best_accuracy = 0.0  # 记录最佳验证准确率
         best_epoch = 0  # 记录最佳性能出现的epoch
 
         for epoch in range(self.config.num_epochs):
@@ -338,27 +426,54 @@ class Trainer:
             # 训练阶段
             # 执行一个完整的训练epoch
             # 使用epoch+1是为了显示更直观的进度（从1开始而不是0）
-            train_loss = self.train_epoch(epoch+1)
+            # train_loss = self.train_epoch(epoch+1)
+            train_loss, train_ppl, train_acc = self.train_epoch(epoch + 1)
 
             # 验证阶段
-            val_loss, rouge_scores = self.validate(epoch+1)
+            # val_loss, rouge_scores = self.validate(epoch+1)
+            val_loss, val_ppl, val_acc, rouge_scores = self.validate(epoch + 1)
 
             # 根据学习率调度策略调整学习率
             self.scheduler.step()  # 更新学习率（如余弦退火）
             current_lr = self.optimizer.param_groups[0]['lr']  # 获取当前学习率
 
             # 打印结果
-            print(f"\n训练结果:")
-            print(f"训练损失: {train_loss:.4f}")  # 训练集损失（越低越好）
-            print(f"验证损失: {val_loss:.4f}")  # 验证集损失（越低越好）
-            print(f"学习率: {current_lr:.2e}")  # 当前学习率（科学计数法显示）
-            # ROUGE分数输出（越高越好）
-            print(f"ROUGE-1: {rouge_scores['rouge1']:.4f}")  # 单词级别相似度
-            print(f"ROUGE-2: {rouge_scores['rouge2']:.4f}")  # 短语级别相似度
-            print(f"ROUGE-L: {rouge_scores['rougeL']:.4f}")  # 句子结构相似度
+            print(f"\n📊 训练结果:")
+            print(f"训练损失: {train_loss:.4f} | 验证损失: {val_loss:.4f}")
+            print(f"训练困惑度: {train_ppl:.2f} | 验证困惑度: {val_ppl:.2f}")
+            print(f"训练准确率: {train_acc:.4f} | 验证准确率: {val_acc:.4f}")
+            print(f"学习率: {current_lr:.2e}")
+            print(f"ROUGE-1: {rouge_scores['rouge1']:.4f} | ROUGE-2: {rouge_scores['rouge2']:.4f} | ROUGE-L: {rouge_scores['rougeL']:.4f}")
+            # print(f"\n训练结果:")
+            # print(f"训练损失: {train_loss:.4f}")  # 训练集损失（越低越好）
+            # print(f"验证损失: {val_loss:.4f}")  # 验证集损失（越低越好）
+            # print(f"学习率: {current_lr:.2e}")  # 当前学习率（科学计数法显示）
+            # # ROUGE分数输出（越高越好）
+            # print(f"ROUGE-1: {rouge_scores['rouge1']:.4f}")  # 单词级别相似度
+            # print(f"ROUGE-2: {rouge_scores['rouge2']:.4f}")  # 短语级别相似度
+            # print(f"ROUGE-L: {rouge_scores['rougeL']:.4f}")  # 句子结构相似度
 
-            # 保存最佳模型
+            # 保存最佳模型(基于准确率)
+            if val_acc > best_accuracy:
+                best_accuracy = val_acc
+                best_epoch = epoch + 1  # 记录最佳epoch
+                best_model_path = os.path.join(self.config.save_dir, f'best_model_{self.config.num_epochs}epochs_{self.config.n_heads}heads.pth')
+                # 保存完整的模型检查点
+                torch.save({
+                    'epoch': epoch,  # 当前epoch数
+                    'model_state_dict': self.model.state_dict(),  # 模型参数
+                    'optimizer_state_dict': self.optimizer.state_dict(),  # 优化器状态
+                    'train_loss': train_loss,  # 训练损失
+                    'val_loss': val_loss,  # 验证损失
+                    'train_perplexity': train_ppl,
+                    'val_perplexity': val_ppl,
+                    'train_accuracy': train_acc,
+                    'val_accuracy': val_acc,
+                    'rouge_scores': rouge_scores  # ROUGE分数
+                }, best_model_path)  # 保存为best_model.pth文件
+                print(f"✅ 保存新的最佳模型 (Epoch {best_epoch}, 验证准确率: {best_accuracy:.4f}, 保存地址：{best_model_path})")
             # 保存最佳模型（基于ROUGE-1分数）
+            '''
             if rouge_scores['rouge1'] > best_rouge:
                 best_rouge = rouge_scores['rouge1']  # 更新最佳分数
                 best_epoch = epoch + 1  # 记录最佳epoch
@@ -370,9 +485,14 @@ class Trainer:
                     'optimizer_state_dict': self.optimizer.state_dict(),  # 优化器状态
                     'train_loss': train_loss,  # 训练损失
                     'val_loss': val_loss,  # 验证损失
+                    'train_perplexity': train_ppl,
+                    'val_perplexity': val_ppl,
+                    'train_accuracy': train_acc,
+                    'val_accuracy': val_acc,
                     'rouge_scores': rouge_scores  # ROUGE分数
                 }, best_model_path)  # 保存为best_model.pth文件
                 print(f"✅ 保存新的最佳模型 (Epoch {best_epoch}, ROUGE-1: {best_rouge:.4f}, 保存地址：{best_model_path})")
+            '''
 
             # 每5个epoch保存一次检查点（防止训练中断丢失进度）
             if (epoch + 1) % 5 == 0:
@@ -402,37 +522,46 @@ class Trainer:
         self.plot_training_curves()
 
         # 保存最终模型
-        torch.save(self.model.state_dict(), '../results/model/final_model.pth')
-        print("💾 保存最终模型: ../results/model/final_model.pth")
+        torch.save(self.model.state_dict(), f'../results/model/final_model_{self.config.num_epochs}epochs_{self.config.n_heads}heads.pth')
+        print(f"💾 保存最终模型: ../results/model/final_model_{self.config.num_epochs}epochs_{self.config.n_heads}heads.pth")
 
     def plot_training_curves(self):
-        """
-        绘制训练和验证曲线 - 可视化模型训练过程和性能变化
-        这个方法创建三个子图来全面展示训练过程中的关键指标：
-        1. 损失曲线：训练损失和验证损失的变化
-        2. ROUGE分数曲线：三种ROUGE评估指标的变化
-        3. 对比曲线：归一化的损失和ROUGE分数对比
-        通过可视化可以直观地分析：
-        - 模型是否收敛
-        - 是否存在过拟合或欠拟合
-        - 训练进度和效果
-        - 最佳性能出现的时间点
-        """
-        plt.figure(figsize=(15, 5))
+        """绘制完整的训练曲线，包含所有评估指标"""
+        plt.figure(figsize=(20, 10))
 
-        # 损失曲线
-        plt.subplot(1, 3, 1)
-        plt.plot(self.train_losses, 'b-', label='训练损失', linewidth=2)
-        plt.plot(self.val_losses, 'r-', label='验证损失', linewidth=2)
+        # 1. 损失曲线
+        plt.subplot(2, 2, 1)
+        epochs = range(1, len(self.train_losses) + 1)
+        plt.plot(epochs, self.train_losses, 'b-', label='训练损失', linewidth=2)
+        plt.plot(epochs, self.val_losses, 'r-', label='验证损失', linewidth=2)
         plt.xlabel('Epoch')
         plt.ylabel('Loss')
-        plt.title('训练和验证损失')
+        plt.title('损失曲线')
         plt.legend()
         plt.grid(True, alpha=0.3)
 
-        # ROUGE分数曲线
-        plt.subplot(1, 3, 2)
-        epochs = range(1, len(self.rouge_scores) + 1)
+        # 2. 困惑度曲线
+        plt.subplot(2, 2, 2)
+        plt.plot(epochs, self.train_perplexities, 'b-', label='训练困惑度', linewidth=2)
+        plt.plot(epochs, self.val_perplexities, 'r-', label='验证困惑度', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Perplexity')
+        plt.title('困惑度曲线')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 3. 准确率曲线
+        plt.subplot(2, 2, 3)
+        plt.plot(epochs, self.train_accuracies, 'b-', label='训练准确率', linewidth=2)
+        plt.plot(epochs, self.val_accuracies, 'r-', label='验证准确率', linewidth=2)
+        plt.xlabel('Epoch')
+        plt.ylabel('Accuracy')
+        plt.title('准确率曲线')
+        plt.legend()
+        plt.grid(True, alpha=0.3)
+
+        # 4. ROUGE分数曲线
+        plt.subplot(2, 2, 4)
         rouge1_scores = [score['rouge1'] for score in self.rouge_scores]
         rouge2_scores = [score['rouge2'] for score in self.rouge_scores]
         rougeL_scores = [score['rougeL'] for score in self.rouge_scores]
@@ -442,39 +571,24 @@ class Trainer:
         plt.plot(epochs, rougeL_scores, 'r-', label='ROUGE-L', linewidth=2)
         plt.xlabel('Epoch')
         plt.ylabel('ROUGE Score')
-        plt.title('验证集ROUGE分数变化')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-
-        # 损失和ROUGE的对比
-        plt.subplot(1, 3, 3)
-        # 归一化损失和ROUGE分数以便在同一图中显示
-        # 数据归一化处理：将不同量纲的数据缩放到相同范围[0,1]
-        # 归一化训练损失：除以最大值，使所有值在0-1之间
-        norm_train_loss = np.array(self.train_losses) / max(self.train_losses)
-        # 归一化ROUGE-1分数：除以最大值（避免除零错误）
-        norm_rouge1 = np.array(rouge1_scores) / max(rouge1_scores) if max(rouge1_scores) > 0 else np.array(rouge1_scores)
-
-        plt.plot(epochs, norm_train_loss, 'b-', label='归一化训练损失', linewidth=2)
-        plt.plot(epochs, norm_rouge1, 'g-', label='归一化ROUGE-1', linewidth=2)
-        plt.xlabel('Epoch')
-        plt.ylabel('归一化值')
-        plt.title('损失与ROUGE分数对比')
+        plt.title('ROUGE分数曲线')
         plt.legend()
         plt.grid(True, alpha=0.3)
 
         plt.tight_layout()
-        image_path = os.path.join(
-            self.config.image_dir,
-            f'training_curves_{self.config.num_epochs}.png'
-        )
+        image_filename = f'training_curves_{self.config.num_epochs}epochs_{self.config.n_heads}heads.png'
+        image_path = os.path.join(self.config.image_dir, image_filename)
         plt.savefig(image_path, dpi=300, bbox_inches='tight')
         plt.show()
 
-        # 打印最终统计信息
-        print(f"\n训练统计:")
+        # 打印最终统计
+        print(f"\n📊 最终统计:")
         print(f"最终训练损失: {self.train_losses[-1]:.4f}")
         print(f"最终验证损失: {self.val_losses[-1]:.4f}")
+        print(f"最终训练困惑度: {self.train_perplexities[-1]:.2f}")
+        print(f"最终验证困惑度: {self.val_perplexities[-1]:.2f}")
+        print(f"最终训练准确率: {self.train_accuracies[-1]:.4f}")
+        print(f"最终验证准确率: {self.val_accuracies[-1]:.4f}")
         if self.rouge_scores:
             final_rouge = self.rouge_scores[-1]
             print(f"最终ROUGE-1: {final_rouge['rouge1']:.4f}")
@@ -501,6 +615,9 @@ def main():
     # 打印模型参数数量
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型可训练参数数量: {total_params:,}")
+
+    # 测试不同注意力头数量的差别,改为8，要测试就把下面这行取消注释
+    # config.n_heads = 8
 
     # 创建训练器
     trainer = Trainer(model, train_loader, val_loader,test_loader, tokenizer, config)

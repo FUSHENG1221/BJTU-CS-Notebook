@@ -11,14 +11,14 @@ class Config:
     # 模型架构配置
     vocab_size = 50265  # 词汇表大小，对应BART-base分词器的词汇量
     d_model = 256  # 模型维度（隐藏层大小）:决定模型表示能力的核心参数
-    n_heads = 4  # 必须能被d_model整除（256 ÷ 4 = 64，每个头64维）
+    n_heads = 4  # 必须能被d_model整除
     n_layers = 2  # Encoder/Decoder层数:原始Transformer使用6层，这里使用较少层数加快训练;层数越多，模型容量越大，但训练时间越长
     d_ff = 512  # 前馈网络（FFN）的隐藏层维度,通常是d_model的2-4倍
     dropout = 0.1  # Dropout率（丢弃率），正则化技术;随机丢弃一定比例的神经元，防止过拟合
     max_seq_len = 512  # 模型支持的最大序列长度,必须 >= max_input_length
 
     # 训练配置
-    batch_size = 32 # 批次大小，每次训练使用的样本数量,较大的batch_size训练更稳定，但需要更多内存
+    batch_size = 16 # 批次大小，每次训练使用的样本数量,较大的batch_size训练更稳定，但需要更多内存
     learning_rate = 3e-4# 学习率，控制参数更新步长;3e-4是Adam优化器的常用学习率
     # num_epochs = 10 # 训练轮数，整个数据集被完整训练的次数
     num_epochs = 20
@@ -46,9 +46,11 @@ class Config:
             return torch.device("cpu")
 
     # 模型保存配置
-    save_dir = "../results/model"  # 模型保存目录
-    checkpoint_dir = "../results/checkpoints"  # 检查点目录
-    image_dir = "../results/images"  # 图表保存目录
+    save_dir = "..\\results\\model"  # 模型保存目录
+    checkpoint_dir = "..\\results\\checkpoints"  # 检查点目录
+    image_dir = "..\\results\\images"  # 图表保存目录
+    local_tokenizer_path = "../data/tokenizer/facebook/bart-base"
+    local_data_dir = "../data/samsum"
 
     def __init__(self):
         """初始化时创建必要的目录"""
